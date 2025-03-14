@@ -134,9 +134,9 @@ class RKLLM:
             raise Exception("Only Linux is supported for now.")
         self.lib = ctypes.CDLL(lib_path)
         self.handle = RKLLM_Handle_t()
-        self._init_function_prototypes()
+        self.__init_function_prototypes()
 
-    def _init_function_prototypes(self):
+    def __init_function_prototypes(self):
         """Initialize function prototypes for the shared library."""
         self.lib.rkllm_createDefaultParam.restype = RKLLMParam
 
@@ -173,7 +173,7 @@ class RKLLM:
 
     def init(self, param: RKLLMParam, callback) -> int:
         """Initialize the LLM with the given parameters."""
-        return self.lib.rkllm_init(ctypes.byref(self.handle), ctypes.byref(param), callback)
+        return self.lib.rkllm_init(ctypes.byref(self.handle), ctypes.byref(param), LLMResultCallback(callback))
 
     def load_lora(self, lora_adapter: RKLLMLoraAdapter) -> int:
         """Load a Lora adapter into the LLM."""
@@ -206,3 +206,77 @@ class RKLLM:
     def is_running(self) -> int:
         """Check if an LLM task is currently running."""
         return self.lib.rkllm_is_running(self.handle)
+
+
+class RkllmEasy:
+    '''
+    注意: RkllmEasy使用单例模式设计
+    '''
+    rkllm = None
+    event_map = dict()
+    def __init__(self, lib_path):
+        RkllmEasy.rkllm = RKLLM(lib_path)
+        self.param = self.rkllm.create_default_param()
+        self.param.top_k                       = 1
+        self.param.top_p                       = 0.95
+        self.param.temperature                 = 0.8
+        self.param.repeat_penalty              = 1.1
+        self.param.frequency_penalty           = 0.0
+        self.param.presence_penalty            = 0.0
+        self.param.max_new_tokens              = 2048
+        self.param.max_context_len             = 4096
+        self.param.skip_special_token          = True
+        self.param.extend_param.base_domain_id = 0
+
+    def get_default_param(self):
+        '''
+        获取默认参数
+        '''
+        return self.param
+
+    def load_model(self, path:str, param:RKLLMParam = None):
+        '''
+        载入模型
+        '''
+        if param == None:
+            param = self.param
+            param.model_path = bytes(path, 'utf-8')
+        return self.rkllm.init(param, RkllmEasy.__callback)
+
+    def run(self, prompt:str, rkllm_input:RKLLMInput = None, rkllm_infer_params:RKLLMInferParam = None, user_data = None):
+        '''
+        运行一次推理
+        '''
+        if rkllm_input == None:
+            rkllm_input             = RKLLMInput()
+            rkllm_input.input_type  = RKLLMInputMode.RKLLM_INPUT_PROMPT
+            rkllm_input.input_data.prompt_input = ctypes.c_char_p(prompt.encode('utf-8'))
+        if rkllm_infer_params == None:
+            rkllm_infer_params      = RKLLMInferParam()
+            ctypes.memset(ctypes.byref(rkllm_infer_params), 0, ctypes.sizeof(RKLLMInferParam))
+            rkllm_infer_params.mode = RKLLMInferMode.RKLLM_INFER_GENERATE
+            rkllm_infer_params.lora_params = None
+        
+        return self.rkllm.run(rkllm_input, rkllm_infer_params, user_data)
+
+    def add_event_filter(self, state:LLMCallState, callback):
+        '''
+        添加事件过滤器
+        '''
+        self.event_map[state] = callback
+
+    def release(self):
+        '''
+        释放资源
+        '''
+        self.rkllm.destroy()
+
+    @staticmethod
+    def __callback(result:RKLLMResult, userdata, state:LLMCallState):
+        try:
+            if state not in RkllmEasy.event_map:
+                return
+            RkllmEasy.event_map[state](result, userdata)
+        except KeyboardInterrupt:
+            RkllmEasy.rkllm.destroy()
+            raise 'rkllm release, user exit....'
